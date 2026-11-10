@@ -1,0 +1,6 @@
+# Standard library only for the tool and guardrail layer.
+# Add when the LLM agents are built (pin the exact versions you use):
+# langgraph
+# chromadb
+# streamlit
+# sentence-transformers

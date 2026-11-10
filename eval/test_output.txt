@@ -1,0 +1,12 @@
+T2   PASS  variance explained: changes={'reimbursement': -8000, 'tds': -1450} net_diff=-6550 explained=-6550
+T3   PASS  own leave balance: {'entitlement': 12, 'taken': 5, 'balance': 7}
+T4   PASS  other-employee request: flagged=['other_person_request'] net_returned=64870 (own=64870, other=86000) override_logged=True
+T4b  PASS  PII scan catches other ID: {'leak': True, 'others': ['E0107'], 'digits': []}
+T5   PASS  direct injection flagged: ['prompt_injection']
+T6   PASS  poisoned chunk dropped: clean_kept=True poisoned_dropped=True
+T8   PASS  Level-3 request blocked: deny_list=True write_tools=['create_ticket'] ticket=1
+T10  PASS  unexplained variance escalated: changes={} net_diff=-5000 explained=0 ticket=2
+T11  PASS  timeout handled: attempts=3 ticket=3
+
+Tool-layer compare_months latency: 0.012 ms per call (1000 calls)
+RESULT: 9 of 9 checks passed
