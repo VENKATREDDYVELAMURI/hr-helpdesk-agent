@@ -74,14 +74,15 @@ TOOLS = {"get_payslip": get_payslip, "compare_months": compare_months, "get_leav
 WRITE_TOOLS = {"create_ticket"}                    # no tool can change payroll, bank or personal data
 
 # ---------- guardrails ----------
-INJECTION = re.compile(r"ignore (all |any )?(previous|prior) instructions|admin mode|reveal (your |the )?(system )?prompt|print all payslips|list every employee", re.I)
+INJECTION = re.compile(r"(ignore|disregard|forget)\s+(all\s+|any\s+|the\s+|your\s+)?(previous|prior|above|earlier)?\s*(instructions|rules)|admin mode|reveal\s+(your\s+|the\s+)?(system\s+)?prompt|print\s+all\s+payslips|list\s+every\s+employee|(show|print|list)\s+all\s+(the\s+)?(salaries|payslips)|pretend\s+(you\s+are|to\s+be)|you\s+are\s+now\s+(the\s+)?(admin|payroll)", re.I)
+OTHER_PERSON = re.compile(r"\b(colleague|coworker|co-worker|teammate|manager|boss|someone|somebody|everyone|all (the )?employees?)\b.*\b(salary|pay|payslip|earn)|what\s+\w+\s+earns|\b(his|her|their)\s+(salary|payslip|pay)\b", re.I)
 EMP_ID = re.compile(r"\bE\d{4}\b")
 DENY = re.compile(r"(update|change|modify)\s+(my\s+)?(bank|salary|pan|address|tax regime)|approve (my|the) (loan|advance|exception)", re.I)
 
 def input_filter(session, text):
     reasons = []
     if INJECTION.search(text): reasons.append("prompt_injection")
-    if any(i != session.employee_id for i in EMP_ID.findall(text)): reasons.append("other_person_request")
+    if any(i != session.employee_id for i in EMP_ID.findall(text)) or OTHER_PERSON.search(text): reasons.append("other_person_request")
     if reasons: log("input_flagged", session=session.employee_id, reasons=reasons)
     return {"flagged": bool(reasons), "reasons": reasons}
 
@@ -108,3 +109,58 @@ def with_retries(fn, retries=2):
         except TimeoutError:
             log("tool_timeout", attempt=attempts)
             if attempts > retries: return {"ok": False, "attempts": attempts}
+
+# ---------- retrieval over the synthetic policy corpus (TF-IDF, standard library only) ----------
+import math, collections
+POLICY = [
+    ("LEAVE-2.1", "Casual leave: each employee receives 12 days of casual leave per calendar year, credited on 1 January. Casual leave cannot be carried forward; unused days lapse on 31 December."),
+    ("LEAVE-3.2", "Earned leave: each employee earns 18 days of earned leave per year. Up to 30 unused days can be carried forward to the next year."),
+    ("WFH-1.1", "Work from home: employees may work from home up to 8 days in a month with prior approval from the reporting manager."),
+    ("REIMB-4.1", "Reimbursement: claims must be submitted within 30 days of the expense with receipts. Approved claims are paid with the next payroll."),
+    ("PAY-5.1", "Payroll calendar: the payroll cut-off is the 20th of every month. Salary is credited on the last working day of the month."),
+    ("TAX-6.1", "Tax declaration: investment declarations can be revised once per quarter. Tax deducted at source is recalculated from the next payroll after the revision is processed."),
+    ("PF-7.1", "Provident fund: the employee contribution to provident fund is 12 percent of basic salary and is shown as a deduction on the payslip."),
+]
+_STOP = set("a an the is are do i my me can how many what and or of to in on for it be get when with about".split())
+def _tok(t):
+    out = []
+    for w in re.findall(r"[a-z]+", t.lower()):
+        if w in _STOP: continue
+        if w.endswith("s") and len(w) > 3: w = w[:-1]
+        out.append(w)
+    return out
+_DOCS = [(cid, _tok(txt), txt) for cid, txt in POLICY]
+_DF = collections.Counter(w for _, toks, _ in _DOCS for w in set(toks))
+def search_policy(query, top_k=1, threshold=0.12):
+    q = collections.Counter(_tok(query)); n = len(_DOCS); hits = []
+    for cid, toks, txt in _DOCS:
+        d = collections.Counter(toks)
+        w = lambda c, t: c[t] * (math.log((n + 1) / (_DF.get(t, 0) + 1)) + 1)
+        num = sum(w(q, t) * w(d, t) for t in q if t in d)
+        den = math.sqrt(sum(w(q, t) ** 2 for t in q)) * math.sqrt(sum(w(d, t) ** 2 for t in d)) or 1
+        hits.append((num / den, cid, txt))
+    hits = [h for h in sorted(hits, reverse=True) if h[0] >= threshold][:top_k]
+    log("policy_search", query=query, hits=[h[1] for h in hits])
+    return hits          # empty list means "not found"; the agent must say so
+
+# ---------- sensitive-topic check and router (rule layer that runs before the model) ----------
+SENSITIVE = re.compile(r"harass|bully|bullied|discriminat|threaten|abus(e|ed|ive)|grievance|legal action|forced to resign|molest", re.I)
+def sensitive_check(text):
+    hit = bool(SENSITIVE.search(text))
+    if hit: log("sensitive_detected")
+    return {"sensitive": hit, "priority": "high" if hit else "normal"}
+
+MONTHS = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+def route(text, year=2026):
+    t = text.lower()
+    month = next((n for k, n in MONTHS.items() if re.search(r"\b" + k, t)), None)
+    payroll = bool(re.search(r"salary|payslip|pay\b|take-home|deduction|tds|net pay", t))
+    lower = bool(re.search(r"lower|less|kam|reduced|dropped|why", t))
+    leave = bool(re.search(r"leave|chutti", t))
+    if sensitive_check(text)["sensitive"]: return {"route": "case", "intent": "grievance_sensitive"}
+    if payroll and lower:
+        if month is None: return {"route": "payroll", "intent": "payroll_variance", "needs_clarification": True,
+                                  "question": "Which month's salary are you asking about?"}
+        return {"route": "payroll", "intent": "payroll_variance", "needs_clarification": False,
+                "months": (f"{year}-{month-1:02d}", f"{year}-{month:02d}")}
+    return {"route": "leave" if leave else "policy", "intent": "leave_balance" if leave else "policy_faq"}
